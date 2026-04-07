@@ -1,3 +1,5 @@
+import { credentialsDb } from '../db';
+
 export type OAuthConfig = {
   clientId: string;
   clientSecret: string;
@@ -7,33 +9,52 @@ export type OAuthConfig = {
   scopes: string[];
 };
 
-export function getLinkedInConfig(): OAuthConfig {
+function getAppUrl(req?: { headers: { get(name: string): string | null } }): string {
+  if (process.env.NEXT_PUBLIC_APP_URL) return process.env.NEXT_PUBLIC_APP_URL;
+  if (req) {
+    const host = req.headers.get('host') || 'localhost:3000';
+    const proto = req.headers.get('x-forwarded-proto') || 'http';
+    return `${proto}://${host}`;
+  }
+  return 'http://localhost:3000';
+}
+
+export function getLinkedInConfig(appUrl?: string): OAuthConfig | null {
+  const creds = credentialsDb.get('linkedin');
+  if (!creds) return null;
+  const base = appUrl || getAppUrl();
   return {
-    clientId: process.env.LINKEDIN_CLIENT_ID || '',
-    clientSecret: process.env.LINKEDIN_CLIENT_SECRET || '',
-    redirectUri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback/linkedin`,
+    clientId: creds.client_id,
+    clientSecret: creds.client_secret,
+    redirectUri: `${base}/api/auth/callback/linkedin`,
     authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
     tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
     scopes: ['openid', 'profile', 'w_member_social'],
   };
 }
 
-export function getTwitterConfig(): OAuthConfig {
+export function getTwitterConfig(appUrl?: string): OAuthConfig | null {
+  const creds = credentialsDb.get('twitter');
+  if (!creds) return null;
+  const base = appUrl || getAppUrl();
   return {
-    clientId: process.env.TWITTER_CLIENT_ID || '',
-    clientSecret: process.env.TWITTER_CLIENT_SECRET || '',
-    redirectUri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback/twitter`,
+    clientId: creds.client_id,
+    clientSecret: creds.client_secret,
+    redirectUri: `${base}/api/auth/callback/twitter`,
     authUrl: 'https://twitter.com/i/oauth2/authorize',
     tokenUrl: 'https://api.twitter.com/2/oauth2/token',
     scopes: ['tweet.read', 'tweet.write', 'users.read', 'offline.access'],
   };
 }
 
-export function getThreadsConfig(): OAuthConfig {
+export function getThreadsConfig(appUrl?: string): OAuthConfig | null {
+  const creds = credentialsDb.get('threads');
+  if (!creds) return null;
+  const base = appUrl || getAppUrl();
   return {
-    clientId: process.env.THREADS_APP_ID || '',
-    clientSecret: process.env.THREADS_APP_SECRET || '',
-    redirectUri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback/threads`,
+    clientId: creds.client_id,
+    clientSecret: creds.client_secret,
+    redirectUri: `${base}/api/auth/callback/threads`,
     authUrl: 'https://threads.net/oauth/authorize',
     tokenUrl: 'https://graph.threads.net/oauth/access_token',
     scopes: ['threads_basic', 'threads_content_publish'],

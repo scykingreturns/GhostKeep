@@ -24,6 +24,14 @@ function getDb(): Database.Database {
 
 function initSchema(db: Database.Database) {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS oauth_app_credentials (
+      platform TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      client_secret TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
     CREATE TABLE IF NOT EXISTS platform_connections (
       id TEXT PRIMARY KEY,
       platform TEXT NOT NULL,
@@ -219,6 +227,48 @@ export const connectionsDb = {
   delete(id: string): void {
     const db = getDb();
     db.prepare('DELETE FROM platform_connections WHERE id = ?').run(id);
+  },
+};
+
+export type OAuthAppCredentials = {
+  platform: string;
+  client_id: string;
+  client_secret: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export const credentialsDb = {
+  get(platform: string): OAuthAppCredentials | null {
+    const db = getDb();
+    return db.prepare('SELECT * FROM oauth_app_credentials WHERE platform = ?').get(platform) as OAuthAppCredentials | null;
+  },
+
+  getAll(): OAuthAppCredentials[] {
+    const db = getDb();
+    return db.prepare('SELECT * FROM oauth_app_credentials').all() as OAuthAppCredentials[];
+  },
+
+  save(platform: string, clientId: string, clientSecret: string): void {
+    const db = getDb();
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(`
+      INSERT INTO oauth_app_credentials (platform, client_id, client_secret, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(platform) DO UPDATE SET
+        client_id = excluded.client_id,
+        client_secret = excluded.client_secret,
+        updated_at = excluded.updated_at
+    `).run(platform, clientId, clientSecret, now, now);
+  },
+
+  delete(platform: string): void {
+    const db = getDb();
+    db.prepare('DELETE FROM oauth_app_credentials WHERE platform = ?').run(platform);
+  },
+
+  has(platform: string): boolean {
+    return this.get(platform) !== null;
   },
 };
 

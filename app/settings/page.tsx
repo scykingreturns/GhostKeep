@@ -3,7 +3,10 @@
 import { useState, useEffect, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import PlatformIcon from '@/components/PlatformIcon';
-import { Platform, PLATFORMS } from '@/lib/platforms/types';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type Platform = 'linkedin' | 'twitter' | 'threads' | 'substack';
 
 type Connection = {
   id: string;
@@ -15,21 +18,498 @@ type Connection = {
   connected_at: number;
 };
 
-type EnvStatus = {
-  linkedin: boolean;
-  twitter: boolean;
-  threads: boolean;
+type PlatformState = {
+  configured: boolean;
+  client_id?: string;
+  connections: Connection[];
 };
+
+// ─── Platform metadata ───────────────────────────────────────────────────────
+
+const PLATFORM_META: Record<
+  Platform,
+  {
+    name: string;
+    color: string;
+    tagline: string;
+    devPortalUrl: string;
+    devPortalLabel: string;
+    steps: string[];
+    clientIdLabel: string;
+    clientSecretLabel: string;
+  }
+> = {
+  linkedin: {
+    name: 'LinkedIn',
+    color: '#0A66C2',
+    tagline: 'Share professional updates',
+    devPortalUrl: 'https://www.linkedin.com/developers/apps/new',
+    devPortalLabel: 'Open LinkedIn Developer Portal',
+    clientIdLabel: 'Client ID',
+    clientSecretLabel: 'Client Secret',
+    steps: [
+      'Click the button below to open the LinkedIn Developer Portal.',
+      'Sign in and click "Create app". Give it any name (e.g. "My Scheduler") and attach it to a LinkedIn Page (create a dummy one if needed).',
+      'Once created, go to the "Auth" tab. Copy the Client ID and Client Secret from there.',
+      'Still on "Auth", scroll to "OAuth 2.0 settings" and add this Redirect URL:',
+      'Go to the "Products" tab and request access to "Share on LinkedIn" and "Sign In with LinkedIn using OpenID Connect". These are usually approved instantly.',
+      'Paste your Client ID and Client Secret below, then click Save.',
+    ],
+  },
+  twitter: {
+    name: 'X (Twitter)',
+    color: '#000000',
+    tagline: 'Post tweets and threads',
+    devPortalUrl: 'https://developer.twitter.com/en/portal/apps/new',
+    devPortalLabel: 'Open X Developer Portal',
+    clientIdLabel: 'Client ID (OAuth 2.0)',
+    clientSecretLabel: 'Client Secret (OAuth 2.0)',
+    steps: [
+      'Click the button below to open the X Developer Portal. You need a free developer account — sign up if you don\'t have one.',
+      'Create a new project and app. Give it any name.',
+      'In your app settings, find "User authentication settings" and click Set up.',
+      'Set App permissions to "Read and Write". Type of App: "Web App". Add this Callback URL:',
+      'Go to "Keys and Tokens" tab. Under "OAuth 2.0 Client ID and Client Secret", click "Generate" if needed.',
+      'Copy the Client ID and Client Secret and paste them below, then click Save.',
+    ],
+  },
+  threads: {
+    name: 'Threads',
+    color: '#000000',
+    tagline: 'Publish to Meta Threads',
+    devPortalUrl: 'https://developers.facebook.com/apps/creation/',
+    devPortalLabel: 'Open Meta Developer Portal',
+    clientIdLabel: 'App ID',
+    clientSecretLabel: 'App Secret',
+    steps: [
+      'Click the button below to open the Meta Developer Portal. Sign in with your Facebook account.',
+      'Click "Create App". Select "Other" for use case, then "Consumer" as the app type.',
+      'Once created, click "Add Product" and find "Threads API" — click Set Up.',
+      'In Threads API settings, add this as a valid OAuth Redirect URI:',
+      'Go to App Settings → Basic. Copy your App ID and App Secret.',
+      'Paste the App ID and App Secret below, then click Save.',
+    ],
+  },
+  substack: {
+    name: 'Substack',
+    color: '#FF6719',
+    tagline: 'Publish newsletters',
+    devPortalUrl: 'https://substack.com/account/settings',
+    devPortalLabel: 'Open Substack Settings',
+    clientIdLabel: 'Subdomain (e.g. yourname)',
+    clientSecretLabel: 'API Token',
+    steps: [
+      'Click the button below to open your Substack account settings.',
+      'Scroll down to find the "API" or "Publication API" section.',
+      'Copy your API token (it starts with sk_...).',
+      'Enter your Substack subdomain (the part before .substack.com) and paste your API token below.',
+    ],
+  },
+};
+
+// ─── Setup Wizard Modal ───────────────────────────────────────────────────────
+
+function SetupWizard({
+  platform,
+  redirectUri,
+  existingClientId,
+  onClose,
+  onSaved,
+}: {
+  platform: Platform;
+  redirectUri: string;
+  existingClientId?: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const meta = PLATFORM_META[platform];
+  const isSubstack = platform === 'substack';
+
+  const [clientId, setClientId] = useState(existingClientId || '');
+  const [clientSecret, setClientSecret] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [step, setStep] = useState(0);
+
+  const copyRedirectUri = () => {
+    navigator.clipboard.writeText(redirectUri).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  // Steps that involve the redirect URI get a special inline component
+  const REDIRECT_STEP = isSubstack ? -1 : 3; // step index that shows redirect URI
+
+  const handleSave = async () => {
+    if (!clientId.trim() || !clientSecret.trim()) {
+      setError('Both fields are required.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/credentials/${platform}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: clientId.trim(), client_secret: clientSecret.trim() }),
+      });
+      if (!res.ok) throw new Error('Failed to save');
+      onSaved();
+    } catch {
+      setError('Failed to save credentials. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const steps = meta.steps;
+  const isLastStep = step === steps.length - 1;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="px-6 py-5 flex items-center gap-3 border-b border-gray-100">
+          <div
+            className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+            style={{ backgroundColor: meta.color + '15' }}
+          >
+            <PlatformIcon platform={platform} size={22} />
+          </div>
+          <div className="flex-1">
+            <h2 className="font-bold text-gray-900">Connect {meta.name}</h2>
+            <p className="text-xs text-gray-500">One-time setup · takes ~2 minutes</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 -mr-1">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Step progress */}
+        <div className="px-6 pt-4 pb-2">
+          <div className="flex items-center gap-1">
+            {steps.map((_, i) => (
+              <div
+                key={i}
+                className={`h-1 flex-1 rounded-full transition-colors ${
+                  i <= step ? 'bg-indigo-500' : 'bg-gray-200'
+                }`}
+              />
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-1.5">
+            Step {step + 1} of {steps.length}
+          </p>
+        </div>
+
+        {/* Step content */}
+        <div className="px-6 py-4 min-h-[160px]">
+          <p className="text-sm text-gray-700 leading-relaxed mb-4">{steps[step]}</p>
+
+          {/* Redirect URI display — shown on step 3 (or 4 for some) */}
+          {step === REDIRECT_STEP && (
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 flex items-center gap-2">
+              <code className="text-xs text-gray-800 flex-1 break-all">{redirectUri}</code>
+              <button
+                onClick={copyRedirectUri}
+                className={`shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                  copied ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                {copied ? '✓ Copied!' : 'Copy'}
+              </button>
+            </div>
+          )}
+
+          {/* Credentials form — shown on last step */}
+          {isLastStep && (
+            <div className="space-y-3 mt-2">
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">{meta.clientIdLabel}</label>
+                <input
+                  type="text"
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                  placeholder={isSubstack ? 'yourname' : 'Paste here...'}
+                  className="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                  autoFocus
+                />
+                {isSubstack && (
+                  <p className="text-xs text-gray-400 mt-1">Just the subdomain, not the full URL</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-600 mb-1">{meta.clientSecretLabel}</label>
+                <input
+                  type="password"
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                  placeholder="Paste here..."
+                  className="w-full px-3 py-2.5 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                />
+              </div>
+              {error && <p className="text-xs text-red-600">{error}</p>}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 pb-5 flex items-center gap-3">
+          {/* Dev portal button — shown on first step */}
+          {step === 0 && (
+            <a
+              href={meta.devPortalUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-white rounded-xl transition-colors"
+              style={{ backgroundColor: meta.color }}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+              {meta.devPortalLabel}
+            </a>
+          )}
+
+          <div className="flex items-center gap-2 ml-auto">
+            {step > 0 && (
+              <button
+                onClick={() => setStep((s) => s - 1)}
+                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900 font-medium"
+              >
+                Back
+              </button>
+            )}
+            {!isLastStep ? (
+              <button
+                onClick={() => setStep((s) => s + 1)}
+                className="px-5 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-xl hover:bg-indigo-700 transition-colors"
+              >
+                Next →
+              </button>
+            ) : (
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-5 py-2 bg-green-600 text-white text-sm font-semibold rounded-xl hover:bg-green-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {saving ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                    Save & Connect
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Platform Card ────────────────────────────────────────────────────────────
+
+function PlatformCard({
+  platform,
+  state,
+  redirectUri,
+  onSetupSaved,
+  onDisconnect,
+  onRemoveCreds,
+}: {
+  platform: Platform;
+  state: PlatformState;
+  redirectUri: string;
+  onSetupSaved: () => void;
+  onDisconnect: (id: string) => void;
+  onRemoveCreds: () => void;
+}) {
+  const meta = PLATFORM_META[platform];
+  const [showWizard, setShowWizard] = useState(false);
+
+  const handleWizardSaved = () => {
+    setShowWizard(false);
+    onSetupSaved();
+  };
+
+  return (
+    <>
+      {showWizard && (
+        <SetupWizard
+          platform={platform}
+          redirectUri={redirectUri}
+          existingClientId={state.client_id}
+          onClose={() => setShowWizard(false)}
+          onSaved={handleWizardSaved}
+        />
+      )}
+
+      <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden hover:shadow-sm transition-shadow">
+        {/* Card header */}
+        <div className="p-5 flex items-center gap-4">
+          <div
+            className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+            style={{ backgroundColor: meta.color + '12' }}
+          >
+            <PlatformIcon platform={platform} size={26} />
+          </div>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="font-bold text-gray-900 text-base">{meta.name}</h3>
+              {state.connections.length > 0 && (
+                <span className="flex items-center gap-1 text-xs font-medium text-green-700 bg-green-50 px-2 py-0.5 rounded-full border border-green-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
+                  Connected
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-gray-500 mt-0.5">{meta.tagline}</p>
+          </div>
+
+          {/* Action button */}
+          <div className="shrink-0">
+            {state.connections.length > 0 ? (
+              // Already connected — show an "Add another" option
+              platform !== 'substack' ? (
+                <a
+                  href={`/api/auth/connect?platform=${platform}`}
+                  className="text-sm font-medium px-4 py-2 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  + Add account
+                </a>
+              ) : (
+                <button
+                  onClick={() => setShowWizard(true)}
+                  className="text-sm font-medium px-4 py-2 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  + Add publication
+                </button>
+              )
+            ) : state.configured ? (
+              // Credentials saved — show big Connect button
+              <a
+                href={`/api/auth/connect?platform=${platform}`}
+                className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold text-white rounded-xl shadow-md hover:opacity-90 transition-opacity"
+                style={{ backgroundColor: meta.color }}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+                Connect {meta.name}
+              </a>
+            ) : (
+              // Not configured — show setup button
+              <button
+                onClick={() => setShowWizard(true)}
+                className="flex items-center gap-2 px-5 py-2.5 text-sm font-bold text-white rounded-xl shadow-md hover:opacity-90 transition-opacity"
+                style={{ backgroundColor: meta.color }}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
+                </svg>
+                Set up {meta.name}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Connected accounts list */}
+        {state.connections.length > 0 && (
+          <div className="border-t border-gray-100 divide-y divide-gray-50">
+            {state.connections.map((conn) => (
+              <div key={conn.id} className="px-5 py-3 flex items-center gap-3">
+                {conn.avatar_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={conn.avatar_url} alt="" className="w-8 h-8 rounded-full shrink-0" />
+                ) : (
+                  <div
+                    className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0"
+                    style={{ backgroundColor: meta.color }}
+                  >
+                    {conn.account_name[0]?.toUpperCase()}
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-gray-900 truncate">{conn.account_name}</p>
+                  {conn.token_expires_at && (
+                    <p className="text-xs text-gray-400">
+                      Token expires {new Date(conn.token_expires_at * 1000).toLocaleDateString()}
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={() => onDisconnect(conn.id)}
+                  className="text-xs text-gray-400 hover:text-red-600 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors font-medium shrink-0"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Reconfigure link */}
+        {state.configured && state.connections.length === 0 && (
+          <div className="border-t border-gray-50 px-5 py-2 flex items-center justify-between">
+            <p className="text-xs text-gray-400">App credentials saved</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowWizard(true)}
+                className="text-xs text-gray-500 hover:text-gray-700 font-medium"
+              >
+                Edit credentials
+              </button>
+              <button
+                onClick={onRemoveCreds}
+                className="text-xs text-red-400 hover:text-red-600 font-medium"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
 
 function SettingsContent() {
   const searchParams = useSearchParams();
-  const [connections, setConnections] = useState<Connection[]>([]);
+  const [platformStates, setPlatformStates] = useState<Record<Platform, PlatformState>>({
+    linkedin: { configured: false, connections: [] },
+    twitter: { configured: false, connections: [] },
+    threads: { configured: false, connections: [] },
+    substack: { configured: false, connections: [] },
+  });
   const [loading, setLoading] = useState(true);
-  const [envStatus, setEnvStatus] = useState<EnvStatus>({ linkedin: false, twitter: false, threads: false });
-  const [substackForm, setSubstackForm] = useState({ subdomain: '', token: '' });
-  const [substackLoading, setSubstackLoading] = useState(false);
-  const [substackError, setSubstackError] = useState<string | null>(null);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [redirectUri, setRedirectUri] = useState('');
+
+  // Auto-detect the app URL for redirect URIs
+  useEffect(() => {
+    setRedirectUri(window.location.origin);
+  }, []);
 
   const connectedParam = searchParams.get('connected');
   const errorParam = searchParams.get('error');
@@ -38,25 +518,51 @@ function SettingsContent() {
     if (connectedParam) {
       setNotification({ type: 'success', message: `${connectedParam} connected successfully!` });
     } else if (errorParam) {
-      const messages: Record<string, string> = {
-        invalid_state: 'OAuth state mismatch. Please try again.',
+      const msgs: Record<string, string> = {
+        invalid_state: 'Something went wrong — please try connecting again.',
         no_code: 'Authorization was cancelled.',
-        linkedin_not_configured: 'LinkedIn OAuth credentials not configured. See setup guide below.',
-        twitter_not_configured: 'X/Twitter OAuth credentials not configured. See setup guide below.',
-        threads_not_configured: 'Threads OAuth credentials not configured. See setup guide below.',
-        linkedin_auth_failed: 'LinkedIn authentication failed. Check your OAuth credentials.',
-        twitter_auth_failed: 'X/Twitter authentication failed. Check your OAuth credentials.',
-        threads_auth_failed: 'Threads authentication failed. Check your OAuth credentials.',
+        linkedin_not_configured: 'LinkedIn not set up yet. Click "Set up LinkedIn" to get started.',
+        twitter_not_configured: 'X not set up yet. Click "Set up X" to get started.',
+        threads_not_configured: 'Threads not set up yet. Click "Set up Threads" to get started.',
+        linkedin_auth_failed: 'LinkedIn authorization failed. Double-check your Client ID and Secret.',
+        twitter_auth_failed: 'X authorization failed. Double-check your credentials.',
+        threads_auth_failed: 'Threads authorization failed. Double-check your App ID and Secret.',
       };
-      setNotification({ type: 'error', message: messages[errorParam] || `Error: ${errorParam}` });
+      setNotification({ type: 'error', message: msgs[errorParam] || `Error: ${errorParam}` });
     }
   }, [connectedParam, errorParam]);
 
-  const fetchConnections = useCallback(async () => {
+  const loadData = useCallback(async () => {
     try {
-      const res = await fetch('/api/connections');
-      const data = await res.json();
-      setConnections(data);
+      const [connectionsRes, ...credRes] = await Promise.all([
+        fetch('/api/connections'),
+        fetch('/api/credentials/linkedin'),
+        fetch('/api/credentials/twitter'),
+        fetch('/api/credentials/threads'),
+        fetch('/api/credentials/substack'),
+      ]);
+
+      const connections: Connection[] = await connectionsRes.json();
+      const [linkedinCreds, twitterCreds, threadsCreds, substackCreds] = await Promise.all(
+        credRes.map((r) => r.json())
+      );
+
+      const credMap: Record<Platform, { configured: boolean; client_id?: string }> = {
+        linkedin: linkedinCreds,
+        twitter: twitterCreds,
+        threads: threadsCreds,
+        substack: substackCreds,
+      };
+
+      const newStates = {} as Record<Platform, PlatformState>;
+      for (const platform of ['linkedin', 'twitter', 'threads', 'substack'] as Platform[]) {
+        newStates[platform] = {
+          configured: credMap[platform].configured,
+          client_id: credMap[platform].client_id,
+          connections: connections.filter((c) => c.platform === platform),
+        };
+      }
+      setPlatformStates(newStates);
     } catch (err) {
       console.error(err);
     } finally {
@@ -64,347 +570,107 @@ function SettingsContent() {
     }
   }, []);
 
-  const fetchEnvStatus = useCallback(async () => {
-    try {
-      const res = await fetch('/api/env-status');
-      if (res.ok) setEnvStatus(await res.json());
-    } catch {
-      // silently ignore
-    }
-  }, []);
-
   useEffect(() => {
-    fetchConnections();
-    fetchEnvStatus();
-  }, [fetchConnections, fetchEnvStatus]);
+    loadData();
+  }, [loadData]);
 
-  const handleDisconnect = async (id: string, platform: string) => {
-    if (!confirm(`Disconnect this ${platform} account?`)) return;
+  const handleDisconnect = async (id: string) => {
+    if (!confirm('Remove this account?')) return;
     await fetch(`/api/connections/${id}`, { method: 'DELETE' });
-    setConnections((prev) => prev.filter((c) => c.id !== id));
-    setNotification({ type: 'success', message: `${platform} account disconnected.` });
+    await loadData();
+    setNotification({ type: 'success', message: 'Account removed.' });
   };
 
-  const handleSubstackConnect = async () => {
-    if (!substackForm.subdomain || !substackForm.token) {
-      setSubstackError('Both subdomain and API token are required.');
-      return;
-    }
-    setSubstackLoading(true);
-    setSubstackError(null);
-    try {
-      const res = await fetch('/api/auth/substack', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subdomain: substackForm.subdomain, token: substackForm.token }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Connection failed');
-      setSubstackForm({ subdomain: '', token: '' });
-      setNotification({ type: 'success', message: 'Substack connected!' });
-      fetchConnections();
-    } catch (err) {
-      setSubstackError(String(err).replace('Error: ', ''));
-    } finally {
-      setSubstackLoading(false);
-    }
+  const handleRemoveCreds = async (platform: Platform) => {
+    if (!confirm(`Remove ${PLATFORM_META[platform].name} app credentials? You'll need to re-enter them to reconnect.`)) return;
+    await fetch(`/api/credentials/${platform}`, { method: 'DELETE' });
+    await loadData();
   };
 
-  const platformConnections = (platform: string) =>
-    connections.filter((c) => c.platform === platform);
-
-  const platformSetupGuide: Record<string, { steps: string[]; docsUrl: string }> = {
-    linkedin: {
-      steps: [
-        'Go to the LinkedIn Developer Portal and create a new app',
-        'Add "Sign In with LinkedIn using OpenID Connect" and "Share on LinkedIn" products',
-        'Set the authorized redirect URL to: {APP_URL}/api/auth/callback/linkedin',
-        'Copy the Client ID and Client Secret',
-        'Set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET in your .env.local',
-      ],
-      docsUrl: 'https://developer.linkedin.com',
-    },
-    twitter: {
-      steps: [
-        'Go to the Twitter Developer Portal and create a project/app',
-        'Enable OAuth 2.0 with "Read and Write" permissions',
-        'Add the callback URL: {APP_URL}/api/auth/callback/twitter',
-        'Copy the Client ID and Client Secret',
-        'Set TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET in your .env.local',
-      ],
-      docsUrl: 'https://developer.twitter.com',
-    },
-    threads: {
-      steps: [
-        'Go to the Meta for Developers portal and create a new app',
-        'Add the Threads API product',
-        'Configure the valid OAuth redirect URI: {APP_URL}/api/auth/callback/threads',
-        'Copy the App ID and App Secret',
-        'Set THREADS_APP_ID and THREADS_APP_SECRET in your .env.local',
-      ],
-      docsUrl: 'https://developers.facebook.com/docs/threads',
-    },
+  const getRedirectUri = (platform: Platform) => {
+    if (platform === 'substack') return '';
+    return `${redirectUri}/api/auth/callback/${platform}`;
   };
 
   return (
     <div className="flex flex-col min-h-screen">
       {/* Header */}
-      <div className="px-6 py-4 bg-white border-b border-gray-200 shrink-0">
+      <div className="px-6 py-5 bg-white border-b border-gray-200 shrink-0">
         <h1 className="text-xl font-bold text-gray-900">Platform Connections</h1>
-        <p className="text-sm text-gray-500 mt-0.5">Connect your social media accounts to publish content</p>
+        <p className="text-sm text-gray-500 mt-0.5">
+          Connect your accounts to start scheduling posts
+        </p>
       </div>
 
-      <div className="flex-1 overflow-auto p-6 max-w-3xl">
-        {/* Notification */}
-        {notification && (
-          <div
-            className={`mb-6 p-4 rounded-xl flex items-center justify-between ${
-              notification.type === 'success'
-                ? 'bg-green-50 border border-green-200 text-green-800'
-                : 'bg-red-50 border border-red-200 text-red-800'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              {notification.type === 'success' ? (
-                <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+      <div className="flex-1 overflow-auto p-6">
+        <div className="max-w-2xl mx-auto space-y-4">
+          {/* Notification */}
+          {notification && (
+            <div
+              className={`p-4 rounded-xl flex items-center justify-between ${
+                notification.type === 'success'
+                  ? 'bg-green-50 border border-green-200 text-green-800'
+                  : 'bg-red-50 border border-red-200 text-red-800'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {notification.type === 'success' ? (
+                  <svg className="w-5 h-5 text-green-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5 text-red-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                )}
+                <span className="text-sm font-medium">{notification.message}</span>
+              </div>
+              <button onClick={() => setNotification(null)} className="text-inherit opacity-60 hover:opacity-100 p-1">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
-              ) : (
-                <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              )}
-              <span className="text-sm font-medium">{notification.message}</span>
+              </button>
             </div>
-            <button onClick={() => setNotification(null)} className="text-gray-400 hover:text-gray-600">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        )}
+          )}
 
-        {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {/* OAuth Platforms */}
-            {(['linkedin', 'twitter', 'threads'] as const).map((platformId) => {
-              const platform = PLATFORMS[platformId];
-              const conns = platformConnections(platformId);
-              const configured = envStatus[platformId];
-              const guide = platformSetupGuide[platformId];
-
-              return (
-                <div key={platformId} className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-                  <div className="p-5 flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div
-                        className="w-10 h-10 rounded-xl flex items-center justify-center"
-                        style={{ backgroundColor: platform.color + '15' }}
-                      >
-                        <PlatformIcon platform={platformId} size={22} />
-                      </div>
-                      <div>
-                        <h3 className="font-semibold text-gray-900">{platform.name}</h3>
-                        <p className="text-xs text-gray-500">
-                          {conns.length > 0
-                            ? `${conns.length} account${conns.length > 1 ? 's' : ''} connected`
-                            : 'Not connected'}
-                        </p>
-                      </div>
-                    </div>
-                    {configured ? (
-                      <a
-                        href={`/api/auth/connect?platform=${platformId}`}
-                        className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors"
-                        style={{ backgroundColor: platform.color }}
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                        </svg>
-                        Connect Account
-                      </a>
-                    ) : (
-                      <span className="text-xs bg-yellow-50 text-yellow-700 px-3 py-1.5 rounded-lg border border-yellow-200 font-medium">
-                        Setup required
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Connected accounts */}
-                  {conns.length > 0 && (
-                    <div className="border-t border-gray-100 divide-y divide-gray-100">
-                      {conns.map((conn) => (
-                        <div key={conn.id} className="px-5 py-3 flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            {conn.avatar_url ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img src={conn.avatar_url} alt="" className="w-8 h-8 rounded-full" />
-                            ) : (
-                              <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-500 text-sm font-bold">
-                                {conn.account_name[0]?.toUpperCase()}
-                              </div>
-                            )}
-                            <div>
-                              <p className="text-sm font-medium text-gray-900">{conn.account_name}</p>
-                              {conn.token_expires_at && (
-                                <p className="text-xs text-gray-400">
-                                  Token expires {new Date(conn.token_expires_at * 1000).toLocaleDateString()}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => handleDisconnect(conn.id, platform.name)}
-                            className="text-xs text-red-500 hover:text-red-700 px-3 py-1.5 rounded-lg hover:bg-red-50 transition-colors font-medium"
-                          >
-                            Disconnect
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Setup guide */}
-                  {!configured && (
-                    <div className="border-t border-gray-100 p-5 bg-gray-50">
-                      <p className="text-sm font-semibold text-gray-700 mb-3">Setup Instructions</p>
-                      <ol className="list-decimal list-inside space-y-1.5">
-                        {guide.steps.map((step, i) => (
-                          <li key={i} className="text-xs text-gray-600">
-                            {step.replace('{APP_URL}', process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000')}
-                          </li>
-                        ))}
-                      </ol>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Substack — API key based */}
-            <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-              <div className="p-5 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-orange-50 flex items-center justify-center">
-                    <PlatformIcon platform="substack" size={22} />
+          {loading ? (
+            <div className="flex items-center justify-center py-24">
+              <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+            </div>
+          ) : (
+            <>
+              {/* How it works banner — shown if nothing configured yet */}
+              {Object.values(platformStates).every((s) => !s.configured && s.connections.length === 0) && (
+                <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-5 flex gap-4">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center shrink-0">
+                    <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
                   </div>
                   <div>
-                    <h3 className="font-semibold text-gray-900">Substack</h3>
-                    <p className="text-xs text-gray-500">
-                      {platformConnections('substack').length > 0
-                        ? `${platformConnections('substack').length} publication connected`
-                        : 'Not connected'}
+                    <p className="font-semibold text-indigo-900 mb-1">Get started in minutes</p>
+                    <p className="text-sm text-indigo-700">
+                      Click <strong>Set up</strong> on any platform below. A step-by-step guide will walk you through everything — no technical experience needed. Each platform only needs to be set up once.
                     </p>
                   </div>
                 </div>
-              </div>
-
-              {/* Connected substacks */}
-              {platformConnections('substack').length > 0 && (
-                <div className="border-t border-gray-100 divide-y divide-gray-100">
-                  {platformConnections('substack').map((conn) => (
-                    <div key={conn.id} className="px-5 py-3 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center text-orange-600 text-sm font-bold">
-                          S
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-900">{conn.account_name}.substack.com</p>
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => handleDisconnect(conn.id, 'Substack')}
-                        className="text-xs text-red-500 hover:text-red-700 px-3 py-1.5 rounded-lg hover:bg-red-50 transition-colors font-medium"
-                      >
-                        Disconnect
-                      </button>
-                    </div>
-                  ))}
-                </div>
               )}
 
-              {/* Substack connection form */}
-              <div className="border-t border-gray-100 p-5">
-                <p className="text-sm font-semibold text-gray-700 mb-1">Connect a Substack Publication</p>
-                <p className="text-xs text-gray-500 mb-4">
-                  Enter your Substack subdomain and API token to connect your publication.
-                  Find your API token in Substack Settings → API.
-                </p>
-                <div className="flex gap-3 flex-wrap">
-                  <div className="flex-1 min-w-[140px]">
-                    <label className="block text-xs text-gray-600 mb-1 font-medium">Subdomain</label>
-                    <div className="flex items-center border border-gray-300 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-indigo-500 focus-within:border-transparent">
-                      <input
-                        type="text"
-                        value={substackForm.subdomain}
-                        onChange={(e) => setSubstackForm((f) => ({ ...f, subdomain: e.target.value }))}
-                        placeholder="yourname"
-                        className="flex-1 px-3 py-2 text-sm focus:outline-none"
-                      />
-                      <span className="px-2 bg-gray-50 border-l border-gray-200 text-xs text-gray-500 py-2">.substack.com</span>
-                    </div>
-                  </div>
-                  <div className="flex-1 min-w-[200px]">
-                    <label className="block text-xs text-gray-600 mb-1 font-medium">API Token</label>
-                    <input
-                      type="password"
-                      value={substackForm.token}
-                      onChange={(e) => setSubstackForm((f) => ({ ...f, token: e.target.value }))}
-                      placeholder="sk_..."
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                    />
-                  </div>
-                  <div className="flex items-end">
-                    <button
-                      onClick={handleSubstackConnect}
-                      disabled={substackLoading}
-                      className="px-4 py-2 bg-orange-500 text-white text-sm font-medium rounded-lg hover:bg-orange-600 transition-colors disabled:opacity-50"
-                    >
-                      {substackLoading ? 'Connecting...' : 'Connect'}
-                    </button>
-                  </div>
-                </div>
-                {substackError && (
-                  <p className="mt-2 text-xs text-red-600">{substackError}</p>
-                )}
-              </div>
-            </div>
-
-            {/* Environment Variables Info */}
-            <div className="bg-blue-50 border border-blue-200 rounded-2xl p-5">
-              <div className="flex items-start gap-3">
-                <svg className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <div>
-                  <p className="text-sm font-semibold text-blue-800 mb-1">Environment Variables</p>
-                  <p className="text-xs text-blue-700 mb-3">
-                    Add these to your <code className="bg-blue-100 px-1 rounded">.env.local</code> file:
-                  </p>
-                  <pre className="text-xs text-blue-800 bg-blue-100 rounded-lg p-3 overflow-x-auto leading-relaxed">
-{`NEXT_PUBLIC_APP_URL=http://localhost:3000
-
-# LinkedIn
-LINKEDIN_CLIENT_ID=your_client_id
-LINKEDIN_CLIENT_SECRET=your_client_secret
-
-# X / Twitter
-TWITTER_CLIENT_ID=your_client_id
-TWITTER_CLIENT_SECRET=your_client_secret
-
-# Threads (Meta)
-THREADS_APP_ID=your_app_id
-THREADS_APP_SECRET=your_app_secret`}
-                  </pre>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+              {/* Platform cards */}
+              {(['linkedin', 'twitter', 'threads', 'substack'] as Platform[]).map((platform) => (
+                <PlatformCard
+                  key={platform}
+                  platform={platform}
+                  state={platformStates[platform]}
+                  redirectUri={getRedirectUri(platform)}
+                  onSetupSaved={loadData}
+                  onDisconnect={handleDisconnect}
+                  onRemoveCreds={() => handleRemoveCreds(platform)}
+                />
+              ))}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

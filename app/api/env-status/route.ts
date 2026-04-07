@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
+import { credentialsDb } from '@/lib/db';
 
 export async function GET() {
   return NextResponse.json({
-    linkedin: !!(process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET),
-    twitter: !!(process.env.TWITTER_CLIENT_ID && process.env.TWITTER_CLIENT_SECRET),
-    threads: !!(process.env.THREADS_APP_ID && process.env.THREADS_APP_SECRET),
+    linkedin: credentialsDb.has('linkedin'),
+    twitter: credentialsDb.has('twitter'),
+    threads: credentialsDb.has('threads'),
   });
 }
