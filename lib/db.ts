@@ -32,19 +32,6 @@ function initSchema(db: Database.Database) {
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
 
-    CREATE TABLE IF NOT EXISTS platform_connections (
-      id TEXT PRIMARY KEY,
-      platform TEXT NOT NULL,
-      account_name TEXT NOT NULL,
-      account_id TEXT NOT NULL,
-      access_token TEXT NOT NULL,
-      refresh_token TEXT,
-      token_expires_at INTEGER,
-      avatar_url TEXT,
-      connected_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      UNIQUE(platform, account_id)
-    );
-
     CREATE TABLE IF NOT EXISTS posts (
       id TEXT PRIMARY KEY,
       content TEXT NOT NULL,
@@ -86,18 +73,6 @@ export type Post = {
   title: string | null;
   tags: string[];
   platform_post_ids: Record<string, string>;
-};
-
-export type PlatformConnection = {
-  id: string;
-  platform: string;
-  account_name: string;
-  account_id: string;
-  access_token: string;
-  refresh_token: string | null;
-  token_expires_at: number | null;
-  avatar_url: string | null;
-  connected_at: number;
 };
 
 type RawPost = {
@@ -194,39 +169,6 @@ export const postsDb = {
   delete(id: string): void {
     const db = getDb();
     db.prepare('DELETE FROM posts WHERE id = ?').run(id);
-  },
-};
-
-export const connectionsDb = {
-  getAll(): PlatformConnection[] {
-    const db = getDb();
-    return db.prepare('SELECT * FROM platform_connections ORDER BY platform ASC').all() as PlatformConnection[];
-  },
-
-  getByPlatform(platform: string): PlatformConnection[] {
-    const db = getDb();
-    return db.prepare('SELECT * FROM platform_connections WHERE platform = ?').all(platform) as PlatformConnection[];
-  },
-
-  upsert(data: Omit<PlatformConnection, 'connected_at'>): PlatformConnection {
-    const db = getDb();
-    const now = Math.floor(Date.now() / 1000);
-    db.prepare(`
-      INSERT INTO platform_connections (id, platform, account_name, account_id, access_token, refresh_token, token_expires_at, avatar_url, connected_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(platform, account_id) DO UPDATE SET
-        account_name = excluded.account_name,
-        access_token = excluded.access_token,
-        refresh_token = excluded.refresh_token,
-        token_expires_at = excluded.token_expires_at,
-        avatar_url = excluded.avatar_url
-    `).run(data.id, data.platform, data.account_name, data.account_id, data.access_token, data.refresh_token, data.token_expires_at, data.avatar_url, now);
-    return db.prepare('SELECT * FROM platform_connections WHERE id = ?').get(data.id) as PlatformConnection;
-  },
-
-  delete(id: string): void {
-    const db = getDb();
-    db.prepare('DELETE FROM platform_connections WHERE id = ?').run(id);
   },
 };
 
