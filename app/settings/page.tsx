@@ -299,10 +299,11 @@ function Wizard({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ client_id: clientId.trim(), client_secret: clientSecret.trim() }),
       });
-      if (!res.ok) throw new Error('Save failed');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Server error ${res.status}`);
       onSaved();
-    } catch {
-      setError('Could not save. Please try again.');
+    } catch (err) {
+      setError(String(err).replace('Error: ', ''));
       setSaving(false);
     }
   };

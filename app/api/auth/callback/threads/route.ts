@@ -4,6 +4,8 @@ import { getConfig, getBaseUrl, exchangeCodeForToken } from '@/lib/platforms/oau
 import { connectionsDb } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 
+export const runtime = 'nodejs';
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const code = searchParams.get('code');
@@ -20,7 +22,6 @@ export async function GET(req: NextRequest) {
     const config = getConfig('threads', appUrl)!;
     const tokens = await exchangeCodeForToken(config, code);
 
-    // Exchange for long-lived token
     const llRes = await fetch(
       `https://graph.threads.net/access_token?grant_type=th_exchange_token&client_secret=${config.clientSecret}&access_token=${tokens.access_token}`
     );

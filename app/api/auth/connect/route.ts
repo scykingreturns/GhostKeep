@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { getConfig, getBaseUrl, buildAuthUrl, generateState, generatePKCE } from '@/lib/platforms/oauth';
 
+export const runtime = 'nodejs';
+
 export async function GET(req: NextRequest) {
   const platform = req.nextUrl.searchParams.get('platform');
   if (!platform) return NextResponse.json({ error: 'Missing platform' }, { status: 400 });

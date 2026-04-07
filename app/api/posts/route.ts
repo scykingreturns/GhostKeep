@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { postsDb } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 
+export const runtime = 'nodejs';
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const start = searchParams.get('start');

@@ -4,6 +4,8 @@ import { getConfig, getBaseUrl, exchangeCodeForToken } from '@/lib/platforms/oau
 import { connectionsDb } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 
+export const runtime = 'nodejs';
+
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const code = searchParams.get('code');
