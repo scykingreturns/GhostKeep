@@ -1,77 +1,53 @@
-import Database from 'better-sqlite3';
-import path from 'path';
 import fs from 'fs';
+import path from 'path';
 
-const DB_PATH = path.join(process.cwd(), 'data', 'ghostkeep.db');
+const DATA_DIR = path.join(process.cwd(), 'data');
 
-// Ensure data directory exists
-const dataDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-let db: Database.Database;
-
-function getDb(): Database.Database {
-  if (!db) {
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-    initSchema(db);
+function readJson<T>(filename: string, fallback: T): T {
+  ensureDataDir();
+  const file = path.join(DATA_DIR, filename);
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as T;
+  } catch {
+    return fallback;
   }
-  return db;
 }
 
-function initSchema(db: Database.Database) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS oauth_app_credentials (
-      platform TEXT PRIMARY KEY,
-      client_id TEXT NOT NULL,
-      client_secret TEXT NOT NULL,
-      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-
-    CREATE TABLE IF NOT EXISTS platform_connections (
-      id TEXT PRIMARY KEY,
-      platform TEXT NOT NULL,
-      account_name TEXT NOT NULL,
-      account_id TEXT NOT NULL,
-      access_token TEXT NOT NULL,
-      refresh_token TEXT,
-      token_expires_at INTEGER,
-      avatar_url TEXT,
-      connected_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      UNIQUE(platform, account_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS posts (
-      id TEXT PRIMARY KEY,
-      content TEXT NOT NULL,
-      platforms TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'draft',
-      scheduled_at INTEGER,
-      published_at INTEGER,
-      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      media_urls TEXT,
-      title TEXT,
-      tags TEXT,
-      platform_post_ids TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS post_platform_results (
-      id TEXT PRIMARY KEY,
-      post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-      platform TEXT NOT NULL,
-      status TEXT NOT NULL,
-      platform_post_id TEXT,
-      error_message TEXT,
-      published_at INTEGER,
-      created_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-  `);
+function writeJson(filename: string, data: unknown) {
+  ensureDataDir();
+  fs.writeFileSync(path.join(DATA_DIR, filename), JSON.stringify(data, null, 2));
 }
+
+// ─── Credentials ─────────────────────────────────────────────────────────────
+
+type CredentialMap = Record<string, { client_id: string; client_secret: string }>;
+
+export const credentialsDb = {
+  get(platform: string) {
+    const map = readJson<CredentialMap>('credentials.json', {});
+    return map[platform] ?? null;
+  },
+  save(platform: string, clientId: string, clientSecret: string) {
+    const map = readJson<CredentialMap>('credentials.json', {});
+    map[platform] = { client_id: clientId, client_secret: clientSecret };
+    writeJson('credentials.json', map);
+  },
+  delete(platform: string) {
+    const map = readJson<CredentialMap>('credentials.json', {});
+    delete map[platform];
+    writeJson('credentials.json', map);
+  },
+  has(platform: string) {
+    return !!this.get(platform);
+  },
+};
+
+// ─── Platform Connections ─────────────────────────────────────────────────────
 
 export type PlatformConnection = {
   id: string;
@@ -87,32 +63,24 @@ export type PlatformConnection = {
 
 export const connectionsDb = {
   getAll(): PlatformConnection[] {
-    const db = getDb();
-    return db.prepare('SELECT * FROM platform_connections ORDER BY platform, connected_at ASC').all() as PlatformConnection[];
+    return readJson<PlatformConnection[]>('connections.json', []);
   },
   getByPlatform(platform: string): PlatformConnection[] {
-    const db = getDb();
-    return db.prepare('SELECT * FROM platform_connections WHERE platform = ?').all(platform) as PlatformConnection[];
+    return this.getAll().filter(c => c.platform === platform);
   },
-  upsert(data: Omit<PlatformConnection, 'connected_at'>): void {
-    const db = getDb();
-    const now = Math.floor(Date.now() / 1000);
-    db.prepare(`
-      INSERT INTO platform_connections (id, platform, account_name, account_id, access_token, refresh_token, token_expires_at, avatar_url, connected_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(platform, account_id) DO UPDATE SET
-        account_name = excluded.account_name,
-        access_token = excluded.access_token,
-        refresh_token = excluded.refresh_token,
-        token_expires_at = excluded.token_expires_at,
-        avatar_url = excluded.avatar_url
-    `).run(data.id, data.platform, data.account_name, data.account_id, data.access_token, data.refresh_token, data.token_expires_at, data.avatar_url, now);
+  upsert(data: Omit<PlatformConnection, 'connected_at'>) {
+    const all = this.getAll().filter(
+      c => !(c.platform === data.platform && c.account_id === data.account_id)
+    );
+    all.push({ ...data, connected_at: Math.floor(Date.now() / 1000) });
+    writeJson('connections.json', all);
   },
-  delete(id: string): void {
-    const db = getDb();
-    db.prepare('DELETE FROM platform_connections WHERE id = ?').run(id);
+  delete(id: string) {
+    writeJson('connections.json', this.getAll().filter(c => c.id !== id));
   },
 };
+
+// ─── Posts ────────────────────────────────────────────────────────────────────
 
 export type Post = {
   id: string;
@@ -129,143 +97,38 @@ export type Post = {
   platform_post_ids: Record<string, string>;
 };
 
-type RawPost = {
-  id: string;
-  content: string;
-  platforms: string;
-  status: string;
-  scheduled_at: number | null;
-  published_at: number | null;
-  created_at: number;
-  updated_at: number;
-  media_urls: string | null;
-  title: string | null;
-  tags: string | null;
-  platform_post_ids: string | null;
-};
-
-function deserializePost(row: RawPost): Post {
-  return {
-    ...row,
-    platforms: JSON.parse(row.platforms || '[]'),
-    media_urls: JSON.parse(row.media_urls || '[]'),
-    tags: JSON.parse(row.tags || '[]'),
-    platform_post_ids: JSON.parse(row.platform_post_ids || '{}'),
-    status: row.status as Post['status'],
-  };
-}
-
 export const postsDb = {
   getAll(): Post[] {
-    const db = getDb();
-    const rows = db.prepare('SELECT * FROM posts ORDER BY scheduled_at ASC, created_at DESC').all() as RawPost[];
-    return rows.map(deserializePost);
+    return readJson<Post[]>('posts.json', []).sort((a, b) => {
+      if (a.scheduled_at && b.scheduled_at) return a.scheduled_at - b.scheduled_at;
+      return b.created_at - a.created_at;
+    });
   },
-
   getById(id: string): Post | null {
-    const db = getDb();
-    const row = db.prepare('SELECT * FROM posts WHERE id = ?').get(id) as RawPost | undefined;
-    return row ? deserializePost(row) : null;
+    return this.getAll().find(p => p.id === id) ?? null;
   },
-
   getByDateRange(startTs: number, endTs: number): Post[] {
-    const db = getDb();
-    const rows = db.prepare(
-      'SELECT * FROM posts WHERE scheduled_at >= ? AND scheduled_at <= ? ORDER BY scheduled_at ASC'
-    ).all(startTs, endTs) as RawPost[];
-    return rows.map(deserializePost);
-  },
-
-  create(data: Omit<Post, 'created_at' | 'updated_at'>): Post {
-    const db = getDb();
-    const now = Math.floor(Date.now() / 1000);
-    db.prepare(`
-      INSERT INTO posts (id, content, platforms, status, scheduled_at, published_at, media_urls, title, tags, platform_post_ids, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      data.id,
-      data.content,
-      JSON.stringify(data.platforms),
-      data.status,
-      data.scheduled_at,
-      data.published_at,
-      JSON.stringify(data.media_urls),
-      data.title,
-      JSON.stringify(data.tags),
-      JSON.stringify(data.platform_post_ids),
-      now,
-      now
+    return this.getAll().filter(
+      p => p.scheduled_at !== null && p.scheduled_at >= startTs && p.scheduled_at <= endTs
     );
-    return this.getById(data.id)!;
   },
-
+  create(data: Omit<Post, 'created_at' | 'updated_at'>): Post {
+    const now = Math.floor(Date.now() / 1000);
+    const post: Post = { ...data, created_at: now, updated_at: now };
+    const all = readJson<Post[]>('posts.json', []);
+    all.push(post);
+    writeJson('posts.json', all);
+    return post;
+  },
   update(id: string, data: Partial<Omit<Post, 'id' | 'created_at'>>): Post | null {
-    const db = getDb();
-    const now = Math.floor(Date.now() / 1000);
-    const sets: string[] = ['updated_at = ?'];
-    const values: unknown[] = [now];
-
-    if (data.content !== undefined) { sets.push('content = ?'); values.push(data.content); }
-    if (data.platforms !== undefined) { sets.push('platforms = ?'); values.push(JSON.stringify(data.platforms)); }
-    if (data.status !== undefined) { sets.push('status = ?'); values.push(data.status); }
-    if (data.scheduled_at !== undefined) { sets.push('scheduled_at = ?'); values.push(data.scheduled_at); }
-    if (data.published_at !== undefined) { sets.push('published_at = ?'); values.push(data.published_at); }
-    if (data.media_urls !== undefined) { sets.push('media_urls = ?'); values.push(JSON.stringify(data.media_urls)); }
-    if (data.title !== undefined) { sets.push('title = ?'); values.push(data.title); }
-    if (data.tags !== undefined) { sets.push('tags = ?'); values.push(JSON.stringify(data.tags)); }
-    if (data.platform_post_ids !== undefined) { sets.push('platform_post_ids = ?'); values.push(JSON.stringify(data.platform_post_ids)); }
-
-    values.push(id);
-    db.prepare(`UPDATE posts SET ${sets.join(', ')} WHERE id = ?`).run(...values);
-    return this.getById(id);
+    const all = readJson<Post[]>('posts.json', []);
+    const idx = all.findIndex(p => p.id === id);
+    if (idx === -1) return null;
+    all[idx] = { ...all[idx], ...data, updated_at: Math.floor(Date.now() / 1000) };
+    writeJson('posts.json', all);
+    return all[idx];
   },
-
-  delete(id: string): void {
-    const db = getDb();
-    db.prepare('DELETE FROM posts WHERE id = ?').run(id);
+  delete(id: string) {
+    writeJson('posts.json', readJson<Post[]>('posts.json', []).filter(p => p.id !== id));
   },
 };
-
-export type OAuthAppCredentials = {
-  platform: string;
-  client_id: string;
-  client_secret: string;
-  created_at: number;
-  updated_at: number;
-};
-
-export const credentialsDb = {
-  get(platform: string): OAuthAppCredentials | null {
-    const db = getDb();
-    return db.prepare('SELECT * FROM oauth_app_credentials WHERE platform = ?').get(platform) as OAuthAppCredentials | null;
-  },
-
-  getAll(): OAuthAppCredentials[] {
-    const db = getDb();
-    return db.prepare('SELECT * FROM oauth_app_credentials').all() as OAuthAppCredentials[];
-  },
-
-  save(platform: string, clientId: string, clientSecret: string): void {
-    const db = getDb();
-    const now = Math.floor(Date.now() / 1000);
-    db.prepare(`
-      INSERT INTO oauth_app_credentials (platform, client_id, client_secret, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(platform) DO UPDATE SET
-        client_id = excluded.client_id,
-        client_secret = excluded.client_secret,
-        updated_at = excluded.updated_at
-    `).run(platform, clientId, clientSecret, now, now);
-  },
-
-  delete(platform: string): void {
-    const db = getDb();
-    db.prepare('DELETE FROM oauth_app_credentials WHERE platform = ?').run(platform);
-  },
-
-  has(platform: string): boolean {
-    return this.get(platform) !== null;
-  },
-};
-
-export default getDb;
